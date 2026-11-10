@@ -1,0 +1,23 @@
+{
+  "name": "securevault",
+  "version": "1.0.0",
+  "description": "Blockchain-based secure cloud file sharing: client-side encryption, on-chain ownership/permissions, tamper-evident access log",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy": "hardhat run scripts/deploy.js --network localhost",
+    "server": "node server/server.js",
+    "e2e": "node scripts/e2e.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.29.1",
+    "solc": "^0.8.24"
+  },
+  "dependencies": {
+    "ethers": "^6.17.0",
+    "express": "^5.3.0"
+  }
+}

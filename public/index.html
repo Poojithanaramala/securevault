@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SecureVault - blockchain-secured cloud file sharing</title>
+<style>
+:root{--bg:#0f1420;--card:#171e2e;--line:#27314a;--tx:#e6ebf5;--mut:#8b97b5;--ok:#35c28a;--bad:#ef5b6b;--acc:#5b8cff}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{padding:14px 22px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+h1{font-size:18px;margin:0}h2{font-size:14px;margin:0 0 10px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 22px}@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+button,select,input{font:inherit;color:var(--tx);background:#222c44;border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button:hover{border-color:var(--acc)}button.p{background:var(--acc);border-color:var(--acc)}
+.file{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.tag{font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}code{font-size:12px;color:var(--mut);word-break:break-all}
+#log{font:12px/1.5 ui-monospace,monospace;max-height:340px;overflow:auto;white-space:pre-wrap}
+.who{display:flex;gap:6px}.who button.on{background:var(--acc);border-color:var(--acc)}
+</style></head><body>
+<header>
+  <h1>SecureVault</h1><span class="tag">AES-256-GCM in browser</span><span class="tag">Smart-contract access control</span><span class="tag">Hash-chained audit log</span>
+  <div style="flex:1"></div><span>Acting as:</span><div class="who" id="who"></div>
+</header>
+<main>
+  <section class="card"><h2>1 · Upload (encrypted before it leaves your browser)</h2>
+    <input type="file" id="file"> <button class="p" id="up">Encrypt &amp; Upload</button>
+    <div id="upmsg" style="margin-top:8px"></div>
+    <h2 style="margin-top:18px">2 · Files on the chain</h2><div id="files"></div></section>
+  <section class="card"><h2>Audit trail (verified against the chain)</h2>
+    <div class="row" style="margin:0 0 8px"><select id="auditFile"></select><button id="audit">Verify log</button></div>
+    <div id="auditRes"></div><div id="log"></div>
+    <h2 style="margin-top:18px">Activity</h2><div id="act" style="font-size:12px;max-height:200px;overflow:auto"></div></section>
+</main>
+<script src="/vendor/ethers.js"></script><script src="/lib/crypto.js"></script>
+<script>
+const $=s=>document.querySelector(s), short=a=>a.slice(0,6)+"…"+a.slice(-4);
+const NAMES=["Owner (Prof's student)","Alice","Bob","Mallory (attacker)"];
+let provider, dep, signers=[], addrs=[], cur=0, vault;
+const keyOf=i=>JSON.parse(localStorage.getItem("sv_key_"+addrs[i])||"null");
+const say=(m,c="")=>{const d=document.createElement("div");d.className=c;d.textContent=new Date().toLocaleTimeString()+"  "+m;$("#act").prepend(d)};
+
+async function init(){
+  dep=await (await fetch("/deployment.json")).json();
+  provider=new ethers.JsonRpcProvider(dep.rpc);
+  for(let i=0;i<4;i++){signers.push(await provider.getSigner(i));addrs.push(await signers[i].getAddress());}
+  for(let i=0;i<4;i++){ // demo convenience: this browser holds all four demo users' keys
+    let k=keyOf(i); if(!k){k=await VaultCrypto.generateKeyPair();localStorage.setItem("sv_key_"+addrs[i],JSON.stringify(k));}
+    const c=new ethers.Contract(dep.address,dep.abi,signers[i]);
+    if((await c.publicKeyOf(addrs[i])).toLowerCase()!==k.publicKeyHex.toLowerCase()){await (await c.registerKey(k.publicKeyHex)).wait();} // (re)register if chain key != local key
+  }
+  $("#who").innerHTML="";NAMES.forEach((n,i)=>{const b=document.createElement("button");b.textContent=n;b.onclick=()=>{cur=i;select()};b.id="w"+i;$("#who").append(b)});
+  select();
+}
+function select(){vault=new ethers.Contract(dep.address,dep.abi,signers[cur]);NAMES.forEach((_,i)=>$("#w"+i).classList.toggle("on",i===cur));say("Switched to "+NAMES[cur]+" ("+short(addrs[cur])+")");render();}
+
+$("#up").onclick=async()=>{
+  const f=$("#file").files[0]; if(!f) return $("#upmsg").textContent="Choose a file first.";
+  try{
+    const plain=new Uint8Array(await f.arrayBuffer());
+    const {ciphertext,fileKey}=await VaultCrypto.encryptFile(plain);
+    const {cid}=await (await fetch("/blob",{method:"POST",headers:{"Content-Type":"application/octet-stream"},body:ciphertext})).json();
+    const wrapped=await VaultCrypto.wrapKey(fileKey,keyOf(cur).publicKeyHex);
+    const tx=await vault.registerFile(cid,ethers.keccak256(ciphertext),f.name,wrapped); await tx.wait();
+    $("#upmsg").innerHTML=`<span class="ok">Stored.</span> Cloud holds only ciphertext (${ciphertext.length} bytes). CID <code>${cid.slice(0,20)}…</code>`;
+    say(`Uploaded "${f.name}" – encrypted, ownership recorded on-chain`,"ok"); render();
+  }catch(e){$("#upmsg").innerHTML=`<span class="bad">${e.shortMessage||e.message}</span>`}
+};
+
+async function render(){
+  const n=Number(await vault.fileCount()); const box=$("#files"); box.innerHTML=""; $("#auditFile").innerHTML="";
+  for(let id=1;id<=n;id++){
+    const f=await vault.getFile(id); const mine=f.owner.toLowerCase()===addrs[cur].toLowerCase(); const can=await vault.hasAccess(id,addrs[cur]);
+    $("#auditFile").insertAdjacentHTML("beforeend",`<option value="${id}">#${id} ${f.name}</option>`);
+    const d=document.createElement("div");d.className="file";
+    d.innerHTML=`<b>#${id} ${f.name}</b> <span class="tag">owner: ${short(f.owner)}${mine?" (you)":""}</span> <span class="tag ${can?"ok":"bad"}">${can?"you have access":"no access"}</span><br><code>cid ${f.cid.slice(0,24)}…</code>`;
+    const r=document.createElement("div");r.className="row";
+    const dl=document.createElement("button");dl.textContent="Download & decrypt";dl.onclick=()=>download(id,f.name);r.append(dl);
+    if(mine){
+      const sel=document.createElement("select");addrs.forEach((a,i)=>{if(i!==cur)sel.insertAdjacentHTML("beforeend",`<option value="${i}">${NAMES[i]}</option>`)});
+      const mins=document.createElement("input");mins.type="number";mins.placeholder="expires in min (blank=never)";mins.style.width="180px";
+      const sh=document.createElement("button");sh.textContent="Share";sh.onclick=()=>share(id,+sel.value,mins.value);
+      const rv=document.createElement("button");rv.textContent="Revoke";rv.onclick=()=>revoke(id,+sel.value);
+      const tr=document.createElement("button");tr.textContent="Transfer ownership";tr.onclick=()=>transfer(id,+sel.value);
+      r.append(sel,mins,sh,rv,tr);
+    }
+    const tp=document.createElement("button");tp.textContent="⚠ Simulate cloud tampering";tp.onclick=async()=>{await fetch("/demo/tamper/"+f.cid,{method:"POST"});say("Cloud provider silently altered the stored file","bad")};r.append(tp);
+    d.append(r);box.append(d);
+  }
+  if(!n) box.textContent="No files yet.";
+}
+const guard=async(label,fn)=>{try{await fn();say(label,"ok");render()}catch(e){say(label+" FAILED: "+(e.reason||e.shortMessage||e.message),"bad")}};
+async function share(id,i,mins){return guard(`Shared #${id} with ${NAMES[i]}`,async()=>{
+  const pub=await vault.publicKeyOf(addrs[i]); if(pub==="0x") throw new Error("grantee has not registered a key");
+  const mine=await (await vault.accessFile.staticCall(id)); const fileKey=await VaultCrypto.unwrapKey(mine[2],keyOf(cur).privateJwk);
+  const wrapped=await VaultCrypto.wrapKey(fileKey,pub); const blk=await provider.getBlock("latest");
+  const exp=mins?BigInt(blk.timestamp+Math.round(mins*60)):0n;
+  await (await vault.grantAccess(id,addrs[i],wrapped,exp)).wait();})}
+async function revoke(id,i){return guard(`Revoked ${NAMES[i]} on #${id}`,async()=>{await (await vault.revokeAccess(id,addrs[i])).wait()})}
+async function transfer(id,i){return guard(`Transferred #${id} to ${NAMES[i]}`,async()=>{
+  const res=await vault.accessFile.staticCall(id); const fileKey=await VaultCrypto.unwrapKey(res[2],keyOf(cur).privateJwk);
+  const wrapped=await VaultCrypto.wrapKey(fileKey,await vault.publicKeyOf(addrs[i]));
+  await (await vault.transferOwnership(id,addrs[i],wrapped)).wait();})}
+async function download(id,name){
+  try{
+    const tx=await vault.accessFile(id); await tx.wait();                       // authorisation + on-chain log entry
+    const [cid,hash,wrapped]=await vault.accessFile.staticCall(id);
+    const blob=new Uint8Array(await (await fetch("/blob/"+cid)).arrayBuffer());
+    if(ethers.keccak256(blob)!==hash) throw new Error("INTEGRITY CHECK FAILED – cloud copy does not match on-chain hash");
+    const fileKey=await VaultCrypto.unwrapKey(wrapped,keyOf(cur).privateJwk);
+    const plain=await VaultCrypto.decryptFile(blob,fileKey);
+    const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([plain]));a.download=name;a.click();
+    say(`Downloaded & decrypted #${id}; access recorded on-chain`,"ok");
+  }catch(e){say(`Access to #${id} FAILED: `+(e.reason||e.shortMessage||e.message),"bad")}
+}
+$("#audit").onclick=async()=>{
+  const id=+$("#auditFile").value; if(!id) return;
+  const ev=await vault.queryFilter(vault.filters.AccessLogged(id)); const A=["UPLOAD","GRANT","REVOKE","ACCESS","TRANSFER"]; let head=ethers.ZeroHash,out="";
+  for(const e of ev){const {index,actor,subject,action,timestamp,newHead}=e.args;
+    head=ethers.solidityPackedKeccak256(["bytes32","address","address","uint8","uint64","uint256"],[head,actor,subject,action,timestamp,index]);
+    out+=`#${index} ${new Date(Number(timestamp)*1000).toLocaleTimeString()} ${A[Number(action)].padEnd(8)} by ${short(actor)}${subject===actor?"":" → "+short(subject)}  ${head.slice(0,12)}…${head===newHead?" ✔":" ✘"}\n`;}
+  const onchain=await vault.logHead(id), ok=head===onchain;
+  $("#auditRes").innerHTML=ok?`<span class="ok">✔ Chain verified: ${ev.length} entries recomputed, final hash matches the on-chain head.</span>`:`<span class="bad">✘ TAMPERING DETECTED</span>`;
+  $("#log").textContent=out;
+};
+init().catch(e=>say("Init failed: "+e.message+" (is `npx hardhat node` running and contract deployed?)","bad"));
+</script></body></html>
